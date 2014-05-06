@@ -36,6 +36,7 @@ uses the following mapping:
   * Schema doubles are implemented as float.
   * Schema booleans are implemented as bool. 
 """
+import array
 import struct
 from avro import schema
 import sys
@@ -98,44 +99,29 @@ class SchemaResolutionException(schema.AvroException):
 # Validate
 #
 
+__schema_type_to_validator__ = {
+  'null': lambda expected_schema, datum: datum is None,
+  'boolean': lambda expected_schema, datum: isinstance(datum, bool),
+  'string': lambda expected_schema, datum: isinstance(datum, basestring),
+  'bytes': lambda expected_schema, datum: isinstance(datum, str),
+  'int': lambda expected_schema, datum: ((isinstance(datum, int) or isinstance(datum, long)) and INT_MIN_VALUE <= datum <= INT_MAX_VALUE),
+  'long': lambda expected_schema, datum: ((isinstance(datum, int) or isinstance(datum, long)) and LONG_MIN_VALUE <= datum <= LONG_MAX_VALUE),
+  'float': lambda expected_schema, datum: (isinstance(datum, int) or isinstance(datum, long) or isinstance(datum, float)),
+  'double': lambda expected_schema, datum: (isinstance(datum, int) or isinstance(datum, long) or isinstance(datum, float)),
+  'fixed': lambda expected_schema, datum: isinstance(datum, str) and len(datum) == expected_schema.size,
+  'enum': lambda expected_schema, datum: datum in expected_schema.symbols,
+  'array': lambda expected_schema, datum: (isinstance(datum, list) and False not in [validate(expected_schema.items, d) for d in datum]),
+  'map': lambda expected_schema, datum: (isinstance(datum, dict) and False not in [isinstance(k, basestring) for k in datum.keys()] and False not in [validate(expected_schema.values, v) for v in datum.values()]),
+  'union': lambda expected_schema, datum :True in [validate(s, datum) for s in expected_schema.schemas],
+  'error_union': lambda expected_schema, datum :True in [validate(s, datum) for s in expected_schema.schemas],
+  'record': lambda expected_schema, datum: (isinstance(datum, dict) and False not in [validate(f.type, datum.get(f.name)) for f in expected_schema.fields]),
+  'error': lambda expected_schema, datum: (isinstance(datum, dict) and False not in [validate(f.type, datum.get(f.name)) for f in expected_schema.fields]),
+  'request': lambda expected_schema, datum: (isinstance(datum, dict) and False not in [validate(f.type, datum.get(f.name)) for f in expected_schema.fields]),
+}
+
 def validate(expected_schema, datum):
   """Determine if a python datum is an instance of a schema."""
-  schema_type = expected_schema.type
-  if schema_type == 'null':
-    return datum is None
-  elif schema_type == 'boolean':
-    return isinstance(datum, bool)
-  elif schema_type == 'string':
-    return isinstance(datum, basestring)
-  elif schema_type == 'bytes':
-    return isinstance(datum, str)
-  elif schema_type == 'int':
-    return ((isinstance(datum, int) or isinstance(datum, long)) 
-            and INT_MIN_VALUE <= datum <= INT_MAX_VALUE)
-  elif schema_type == 'long':
-    return ((isinstance(datum, int) or isinstance(datum, long)) 
-            and LONG_MIN_VALUE <= datum <= LONG_MAX_VALUE)
-  elif schema_type in ['float', 'double']:
-    return (isinstance(datum, int) or isinstance(datum, long)
-            or isinstance(datum, float))
-  elif schema_type == 'fixed':
-    return isinstance(datum, str) and len(datum) == expected_schema.size
-  elif schema_type == 'enum':
-    return datum in expected_schema.symbols
-  elif schema_type == 'array':
-    return (isinstance(datum, list) and
-      False not in [validate(expected_schema.items, d) for d in datum])
-  elif schema_type == 'map':
-    return (isinstance(datum, dict) and
-      False not in [isinstance(k, basestring) for k in datum.keys()] and
-      False not in
-        [validate(expected_schema.values, v) for v in datum.values()])
-  elif schema_type in ['union', 'error_union']:
-    return True in [validate(s, datum) for s in expected_schema.schemas]
-  elif schema_type in ['record', 'error', 'request']:
-    return (isinstance(datum, dict) and
-      False not in
-        [validate(f.type, datum.get(f.name)) for f in expected_schema.fields])
+  return __schema_type_to_validator__[expected_schema.type](expected_schema, datum)
 
 #
 # Decoder/Encoder
@@ -279,7 +265,7 @@ class BinaryEncoder(object):
 
   def write(self, datum):
     """Write an abritrary datum."""
-    self.writer.write(datum)
+    self._writer.write(datum)
 
   def write_null(self, datum):
     """
@@ -307,11 +293,12 @@ class BinaryEncoder(object):
     """
     int and long values are written using variable-length, zig-zag coding.
     """
+    lchr = chr #inspired by https://www.python.org/doc/essays/list2str/
     datum = (datum << 1) ^ (datum >> 63)
     while (datum & ~0x7F) != 0:
-      self.write(chr((datum & 0x7f) | 0x80))
+      self.write(lchr((datum & 0x7f) | 0x80))
       datum >>= 7
-    self.write(chr(datum))
+    self.write(lchr(datum))
 
   def write_float(self, datum):
     """
@@ -320,10 +307,9 @@ class BinaryEncoder(object):
     Java's floatToIntBits and then encoded in little-endian format.
     """
     bits = STRUCT_INT.unpack(STRUCT_FLOAT.pack(datum))[0]
-    self.write(chr((bits) & 0xFF))
-    self.write(chr((bits >> 8) & 0xFF))
-    self.write(chr((bits >> 16) & 0xFF))
-    self.write(chr((bits >> 24) & 0xFF))
+    shift_list = [0, 8, 16, 24]
+    results = [((bits >> operand) & 0xFF) for operand in shift_list]
+    self.write(array.array('B', results).tostring())
 
   def write_double(self, datum):
     """
@@ -332,29 +318,25 @@ class BinaryEncoder(object):
     Java's doubleToLongBits and then encoded in little-endian format.
     """
     bits = STRUCT_LONG.unpack(STRUCT_DOUBLE.pack(datum))[0]
-    self.write(chr((bits) & 0xFF))
-    self.write(chr((bits >> 8) & 0xFF))
-    self.write(chr((bits >> 16) & 0xFF))
-    self.write(chr((bits >> 24) & 0xFF))
-    self.write(chr((bits >> 32) & 0xFF))
-    self.write(chr((bits >> 40) & 0xFF))
-    self.write(chr((bits >> 48) & 0xFF))
-    self.write(chr((bits >> 56) & 0xFF))
+    shift_list = [0, 8, 16, 24, 32, 40, 48, 56]
+    results = [((bits >> operand) & 0xFF) for operand in shift_list]
+    self.write(array.array('B', results).tostring())
+
 
   def write_bytes(self, datum):
     """
     Bytes are encoded as a long followed by that many bytes of data. 
     """
-    self.write_long(len(datum))
-    self.write(struct.pack('%ds' % len(datum), datum))
+    length = len(datum)
+    self.write_long(length)
+    self.write(struct.pack('%ds' % length, datum))
 
   def write_utf8(self, datum):
     """
     A string is encoded as a long followed by
     that many bytes of UTF-8 encoded character data.
     """
-    datum = datum.encode("utf-8")
-    self.write_bytes(datum)
+    self.write_bytes(datum.encode("utf-8"))
 
   def write_crc32(self, bytes):
     """
@@ -770,39 +752,33 @@ class DatumWriter(object):
     
     self.write_data(self.writers_schema, datum, encoder)
 
+  primitive_to_func = {
+    'null': lambda self, writers_schema, datum, encoder: encoder.write_null(datum),
+    'boolean': lambda self, writers_schema, datum, encoder: encoder.write_boolean(datum),
+    'string': lambda self, writers_schema, datum, encoder: encoder.write_utf8(datum),
+    'int': lambda self, writers_schema, datum, encoder: encoder.write_int(datum),
+    'long': lambda self, writers_schema, datum, encoder: encoder.write_long(datum),
+    'float': lambda self, writers_schema, datum, encoder: encoder.write_float(datum),
+    'double': lambda self, writers_schema, datum, encoder: encoder.write_double(datum),
+    'bytes': lambda self, writers_schema, datum, encoder: encoder.write_bytes(datum),
+    'fixed': lambda self, writers_schema, datum, encoder: self.write_fixed(writers_schema, datum, encoder),
+    'enum': lambda self, writers_schema, datum, encoder: self.write_enum(writers_schema, datum, encoder),
+    'array': lambda self, writers_schema, datum, encoder: self.write_array(writers_schema, datum, encoder),
+    'map': lambda self, writers_schema, datum, encoder: self.write_map(writers_schema, datum, encoder),
+    'union': lambda self, writers_schema, datum, encoder: self.write_union(writers_schema, datum, encoder),
+    'error_union': lambda self, writers_schema, datum, encoder: self.write_union(writers_schema, datum, encoder),
+    'record': lambda self, writers_schema, datum, encoder: self.write_record(writers_schema, datum, encoder),
+    'error': lambda self, writers_schema, datum, encoder: self.write_record(writers_schema, datum, encoder),
+    'request': lambda self, writers_schema, datum, encoder: self.write_record(writers_schema, datum, encoder),
+  }
+
   def write_data(self, writers_schema, datum, encoder):
     # function dispatch to write datum
-    if writers_schema.type == 'null':
-      encoder.write_null(datum)
-    elif writers_schema.type == 'boolean':
-      encoder.write_boolean(datum)
-    elif writers_schema.type == 'string':
-      encoder.write_utf8(datum)
-    elif writers_schema.type == 'int':
-      encoder.write_int(datum)
-    elif writers_schema.type == 'long':
-      encoder.write_long(datum)
-    elif writers_schema.type == 'float':
-      encoder.write_float(datum)
-    elif writers_schema.type == 'double':
-      encoder.write_double(datum)
-    elif writers_schema.type == 'bytes':
-      encoder.write_bytes(datum)
-    elif writers_schema.type == 'fixed':
-      self.write_fixed(writers_schema, datum, encoder)
-    elif writers_schema.type == 'enum':
-      self.write_enum(writers_schema, datum, encoder)
-    elif writers_schema.type == 'array':
-      self.write_array(writers_schema, datum, encoder)
-    elif writers_schema.type == 'map':
-      self.write_map(writers_schema, datum, encoder)
-    elif writers_schema.type in ['union', 'error_union']:
-      self.write_union(writers_schema, datum, encoder)
-    elif writers_schema.type in ['record', 'error', 'request']:
-      self.write_record(writers_schema, datum, encoder)
-    else:
-      fail_msg = 'Unknown type: %s' % writers_schema.type
-      raise schema.AvroException(fail_msg)
+    try:
+        self.primitive_to_func[writers_schema.type](self, writers_schema, datum, encoder)
+    except Exception as f:
+        fail_msg = 'Unknown type: %s' % writers_schema.type
+        raise schema.AvroException(fail_msg)
 
   def write_fixed(self, writers_schema, datum, encoder):
     """
