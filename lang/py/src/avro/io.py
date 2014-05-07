@@ -110,13 +110,13 @@ __schema_type_to_validator__ = {
   'double': lambda expected_schema, datum: (isinstance(datum, int) or isinstance(datum, long) or isinstance(datum, float)),
   'fixed': lambda expected_schema, datum: isinstance(datum, str) and len(datum) == expected_schema.size,
   'enum': lambda expected_schema, datum: datum in expected_schema.symbols,
-  'array': lambda expected_schema, datum: (isinstance(datum, list) and False not in [validate(expected_schema.items, d) for d in datum]),
-  'map': lambda expected_schema, datum: (isinstance(datum, dict) and False not in [isinstance(k, basestring) for k in datum.keys()] and False not in [validate(expected_schema.values, v) for v in datum.values()]),
-  'union': lambda expected_schema, datum :True in [validate(s, datum) for s in expected_schema.schemas],
-  'error_union': lambda expected_schema, datum :True in [validate(s, datum) for s in expected_schema.schemas],
-  'record': lambda expected_schema, datum: (isinstance(datum, dict) and False not in [validate(f.type, datum.get(f.name)) for f in expected_schema.fields]),
-  'error': lambda expected_schema, datum: (isinstance(datum, dict) and False not in [validate(f.type, datum.get(f.name)) for f in expected_schema.fields]),
-  'request': lambda expected_schema, datum: (isinstance(datum, dict) and False not in [validate(f.type, datum.get(f.name)) for f in expected_schema.fields]),
+  'array': lambda expected_schema, datum: (isinstance(datum, list) and all([validate(expected_schema.items, d) for d in datum])),
+  'map': lambda expected_schema, datum: (isinstance(datum, dict) and all([isinstance(k, basestring) for k in datum.keys()]) and all([validate(expected_schema.values, v) for v in datum.values()])),
+  'union': lambda expected_schema, datum: any([validate(s, datum) for s in expected_schema.schemas]),
+  'error_union': lambda expected_schema, datum: any([validate(s, datum) for s in expected_schema.schemas]),
+  'record': lambda expected_schema, datum: (isinstance(datum, dict) and all([validate(f.type, datum.get(f.name)) for f in expected_schema.fields])),
+  'error': lambda expected_schema, datum: (isinstance(datum, dict) and all([validate(f.type, datum.get(f.name)) for f in expected_schema.fields])),
+  'request': lambda expected_schema, datum: (isinstance(datum, dict) and all([validate(f.type, datum.get(f.name)) for f in expected_schema.fields])),
 }
 
 def validate(expected_schema, datum):
@@ -279,9 +279,9 @@ class BinaryEncoder(object):
     whose value is either 0 (false) or 1 (true).
     """
     if datum:
-      self.write(chr(1))
+      self._writer.write(chr(1))
     else:
-      self.write(chr(0))
+      self._writer.write(chr(0))
 
   def write_int(self, datum):
     """
@@ -296,9 +296,9 @@ class BinaryEncoder(object):
     lchr = chr #inspired by https://www.python.org/doc/essays/list2str/
     datum = (datum << 1) ^ (datum >> 63)
     while (datum & ~0x7F) != 0:
-      self.write(lchr((datum & 0x7f) | 0x80))
+      self._writer.write(lchr((datum & 0x7f) | 0x80))
       datum >>= 7
-    self.write(lchr(datum))
+    self._writer.write(lchr(datum))
 
   def write_float(self, datum):
     """
@@ -309,7 +309,7 @@ class BinaryEncoder(object):
     bits = STRUCT_INT.unpack(STRUCT_FLOAT.pack(datum))[0]
     shift_list = [0, 8, 16, 24]
     results = [((bits >> operand) & 0xFF) for operand in shift_list]
-    self.write(array.array('B', results).tostring())
+    self._writer.write(array.array('B', results).tostring())
 
   def write_double(self, datum):
     """
@@ -320,7 +320,7 @@ class BinaryEncoder(object):
     bits = STRUCT_LONG.unpack(STRUCT_DOUBLE.pack(datum))[0]
     shift_list = [0, 8, 16, 24, 32, 40, 48, 56]
     results = [((bits >> operand) & 0xFF) for operand in shift_list]
-    self.write(array.array('B', results).tostring())
+    self._writer.write(array.array('B', results).tostring())
 
 
   def write_bytes(self, datum):
@@ -329,7 +329,7 @@ class BinaryEncoder(object):
     """
     length = len(datum)
     self.write_long(length)
-    self.write(struct.pack('%ds' % length, datum))
+    self._writer.write(struct.pack('%ds' % length, datum))
 
   def write_utf8(self, datum):
     """
@@ -342,7 +342,7 @@ class BinaryEncoder(object):
     """
     A 4-byte, big-endian CRC32 checksum
     """
-    self.write(STRUCT_CRC32.pack(crc32(bytes) & 0xffffffff));
+    self._writer.write(STRUCT_CRC32.pack(crc32(bytes) & 0xffffffff));
 
 #
 # DatumReader/Writer
